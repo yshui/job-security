@@ -55,8 +55,7 @@ impl Shell {
                 .map(Into::into)
                 .into_iter()
                 .collect(),
-            Shell::Nushell => vec![cmd.join(" ").into()],
-            Shell::Unknown => cmd.into_iter().map(Into::into).collect(),
+            Shell::Nushell | Shell::Unknown => cmd.into_iter().map(Into::into).collect(),
         }
     }
 }

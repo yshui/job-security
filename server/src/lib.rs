@@ -455,11 +455,11 @@ impl Server {
                 })
                 .await?;
                 let x = evt.next().await;
-                let Some(Ok(RunnerEvent::StateChanged(ProcessState::Running, pid))) = x else {
-                    panic!()
+                let Some(Ok(RunnerEvent::StateChanged(ProcessState::Running, pid))) = &x else {
+                    panic!("{x:?}")
                 };
                 let shared = Arc::new(ProcessShared {
-                    pid,
+                    pid: *pid,
                     key: index,
                     command,
                     state: RwLock::new(ProcessState::Running),
