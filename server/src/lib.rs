@@ -654,6 +654,16 @@ impl Runner {
     }
 
     async fn real_run(mut self, ctl: UnixStream) {
+        // Reset relevant signal handlers
+        use nix::sys::signal;
+        unsafe {
+            signal::signal(signal::Signal::SIGTSTP, signal::SigHandler::SigDfl).unwrap();
+            signal::signal(signal::Signal::SIGTTOU, signal::SigHandler::SigDfl).unwrap();
+            signal::signal(signal::Signal::SIGTTIN, signal::SigHandler::SigDfl).unwrap();
+            let sigset = signal::SigSet::empty();
+            signal::sigprocmask(signal::SigmaskHow::SIG_SETMASK, Some(&sigset), None).unwrap();
+        }
+
         let mut framed = tokio_util::codec::Framed::new(ctl, runner_codec());
         let RunnerRequest::Start { command, env, pwd } = framed.next().await.unwrap().unwrap() else {
             panic!();
