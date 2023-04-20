@@ -1,0 +1,19 @@
+[package]
+name = "job-security-server"
+description = "job-security server, receives requests from clients and execute commands"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bincode.workspace = true
+dlv-list = "0.5.0"
+futures-util = { workspace = true, features = ["sink", "alloc"] }
+indexmap = "1.9.3"
+nix = { workspace = true, features = ["term", "process", "ioctl", "fs"] }
+protocol = { version = "0.1.0", path = "../protocol", package = "job-security-protocol" }
+serde = { version = "1.0.160", features = ["derive"] }
+tokio = { workspace = true, features = ["process", "net", "fs", "macros", "signal", "rt", "io-util"] }
+tokio-command-fds = "0.2.1"
+tokio-util = { workspace = true, features = ["codec"] }
+tracing.workspace = true
+withfd = { workspace = true, features = ["tokio"] }

@@ -1,0 +1,12 @@
+[package]
+name = "job-security-protocol"
+description = "Protocol used between job-security server and client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bincode.workspace = true
+bytes = { version = "1.4.0", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "1.0.40"
+tokio-util = { workspace = true, features = ["codec"] }

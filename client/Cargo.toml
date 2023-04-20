@@ -1,0 +1,14 @@
+[package]
+name = "job-security-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+futures-util = { workspace = true, features = ["sink"] }
+libc.workspace = true
+nix = { workspace = true, features = ["term", "user", "socket", "uio", "signal", "ioctl"] }
+protocol = { version = "0.1.0", path = "../protocol", package = "job-security-protocol" }
+tokio = { workspace = true, features = ["net", "io-util", "io-std", "macros", "signal"] }
+tokio-util = { workspace = true, features = ["codec"] }
+tracing.workspace = true
+withfd = { workspace = true, features = ["tokio"] }

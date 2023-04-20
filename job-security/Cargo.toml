@@ -1,0 +1,19 @@
+[package]
+name = "job-security"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.2.2", features = ["derive"] }
+client = { version = "0.1.0", path = "../client", package = "job-security-client" }
+daemonize = "0.5.0"
+protocol = { version = "0.1.0", path = "../protocol", package = "job-security-protocol" }
+server = { version = "0.1.0", path = "../server", package = "job-security-server" }
+tabled = "0.11.1"
+termcolor = "1.2.0"
+tokio = { workspace = true, features = ["rt", "tracing", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+
+[[bin]]
+name = "jobs"
+path = "src/main.rs"
