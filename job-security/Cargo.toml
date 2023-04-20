@@ -1,7 +1,14 @@
 [package]
 name = "job-security"
+authors = ["Yuxuan Shui <yshuiv7@gmail.com>"]
+description = "Universal job control"
+keywords = ["job-control", "process", "unix", "shell", "terminal"]
+categories = ["command-line-utilities"]
+repository = "https://github.com/yshui/job-security"
+license = "MPL-2.0"
 version = "0.1.0"
 edition = "2021"
+readme = "../README.md"
 
 [dependencies]
 clap = { version = "4.2.2", features = ["derive"] }
