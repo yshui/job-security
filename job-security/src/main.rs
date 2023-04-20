@@ -30,7 +30,15 @@ enum Command {
         fetch_output: bool,
     },
     /// Start a new job
-    Run { cmd: String, args: Vec<String> },
+    Run {
+        cmd:  String,
+        args: Vec<String>,
+
+        /// Detach after starting the job. If not specified, the job will run in
+        /// the foreground
+        #[clap(short, long)]
+        detached: bool,
+    },
     /// List all jobs
     List,
     /// Stop the server
@@ -168,7 +176,11 @@ fn main() -> std::io::Result<()> {
     };
 
     let status = match opts.command {
-        Command::Run { cmd, args } => {
+        Command::Run {
+            cmd,
+            args,
+            detached,
+        } => {
             let shell = detect_current_shell();
             let cmd = std::iter::once(cmd).chain(args).collect();
             let cmd = shell.wrap_command(cmd);
@@ -181,7 +193,7 @@ fn main() -> std::io::Result<()> {
                     cols:    0,
                     rows:    0,
                 },
-                false,
+                detached,
             ))?
         },
         Command::Continue {
