@@ -29,3 +29,8 @@ cargo install job-security
   ```bash
   jobs list
   ```
+
+## Limitations
+
+- Terminal environment is generally not preserved. `jobs` tries to preserve the current working directory, and environment variables for the commands it spawns, but not much more. If you define aliases, functions, etc. in your shell, those will not be visible to the command you run.
+- Not all shell expressions are supported. You can run zsh or bash expressions through `jobs`, as they will be automatically wrap in `zsh -c` or `bash -c`. But due to the limitations of other shells (e.g. nushell), commands are run as is, and not interpreted.
