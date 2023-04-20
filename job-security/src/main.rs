@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::{ffi::OsString, process::ExitCode};
 
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use daemonize::{Daemonize, Outcome};
@@ -116,7 +116,7 @@ mod ui;
 use protocol::{ExitStatus, ProcessState};
 use ui::Tui;
 
-fn main() -> std::io::Result<()> {
+fn main() -> std::io::Result<ExitCode> {
     let command = Opts::command()
         .subcommand(clap::Command::new("__runner").hide(true))
         .mut_subcommand("run", |c| {
@@ -134,13 +134,13 @@ fn main() -> std::io::Result<()> {
     if matches.subcommand_matches("__runner").is_some() {
         let runner = server::Runner::default();
         unsafe { runtime.block_on(runner.run()) };
-        return Ok(())
+        return Ok(ExitCode::SUCCESS)
     }
     let opts = Opts::from_arg_matches(&matches).unwrap();
     let subscriber_builder = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env());
     if let Command::Daemon { log_file } = &opts.command {
-        let server = server::Server::new(vec!["__runner".into()]).unwrap();
+        let server = server::Server::new(vec!["__runner".into()])?;
         if let Some(log_file) = log_file {
             let log_file = std::fs::OpenOptions::new()
                 .read(false)
@@ -152,8 +152,8 @@ fn main() -> std::io::Result<()> {
         } else {
             subscriber_builder.init();
         }
-        runtime.block_on(server.run()).unwrap();
-        return Ok(())
+        runtime.block_on(server.run())?;
+        return Ok(ExitCode::SUCCESS)
     }
 
     subscriber_builder.init();
@@ -170,7 +170,7 @@ fn main() -> std::io::Result<()> {
                 e.kind() == std::io::ErrorKind::ConnectionRefused =>
         {
             eprintln!("Daemon is not running");
-            return Ok(())
+            return Ok(ExitCode::FAILURE)
         },
         Err(e) => return Err(e),
     };
@@ -216,19 +216,16 @@ fn main() -> std::io::Result<()> {
     };
     if let Some(status) = status {
         match status {
-            ProcessState::Stopped => {
-                println!("Job stopped");
-            },
+            ProcessState::Stopped | ProcessState::Running => Ok(ExitCode::SUCCESS),
             ProcessState::Terminated(status) => match status {
-                ExitStatus::Exited(code) if code == 0 => println!("Job completed successfully"),
-                ExitStatus::Exited(code) => println!("Job completed with code {}", code),
-                ExitStatus::Signaled(signal) => println!(
-                    "Job was terminated by signal {}",
-                    client::signal_to_string(signal)?
-                ),
+                ExitStatus::Exited(code) => Ok((code as u8).into()),
+                ExitStatus::Signaled(signal) => {
+                    println!("Terminated by signal {}", client::signal_to_string(signal)?);
+                    Ok(ExitCode::FAILURE)
+                },
             },
-            ProcessState::Running => {},
         }
+    } else {
+        Ok(ExitCode::SUCCESS)
     }
-    Ok(())
 }
