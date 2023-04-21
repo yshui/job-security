@@ -194,7 +194,8 @@ impl Client {
         let mut id = None;
         let status = loop {
             select! {
-                event = LogFuture(conn.next()) => {
+                event = conn.next() => {
+                    tracing::info!("event: {:?}", event);
                     let Some(event) = event else {
                         return Err(std::io::ErrorKind::UnexpectedEof.into())
                     };

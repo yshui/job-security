@@ -14,7 +14,7 @@ use std::{
 };
 
 use dlv_list::VecList;
-use futures_util::{future::OptionFuture, Sink, SinkExt, Stream, StreamExt};
+use futures_util::{future::OptionFuture, stream::FusedStream, Sink, SinkExt, StreamExt};
 use nix::{
     sys::wait::{WaitPidFlag, WaitStatus},
     unistd::Pid,
@@ -83,6 +83,14 @@ struct Client {
 }
 
 struct ProcessShared {
+    // Some contracts to keep the server race-safe:
+    //
+    // - reaped can only be set to true when client_connected is true.
+    // - only one client can cause client_connected to become true. to avoid multiple clients
+    //   connect to the same job.
+    // - key can only be removed from the lru list when reaped is true. because otherwise the
+    //   handle_client could have picked the job the resume (because the job's reaped is false),
+    //   just before the job removes itself from the lru.
     pid:              u32,
     key:              dlv_list::Index<u32>,
     command:          Vec<OsString>,
@@ -185,7 +193,7 @@ impl Server {
     ) -> (
         PtyProcess,
         Pin<Box<dyn Sink<RunnerRequest, Error = std::io::Error> + Send + Sync>>,
-        Pin<Box<dyn Stream<Item = std::io::Result<RunnerEvent>> + Send + Sync>>,
+        Pin<Box<dyn FusedStream<Item = std::io::Result<RunnerEvent>> + Send + Sync>>,
     ) {
         let pipe = tokio::net::UnixStream::pair().unwrap();
         let mut cmd = tokio::process::Command::new("/proc/self/exe");
@@ -200,7 +208,7 @@ impl Server {
         let (pty, _) = PtyProcess::spawn(cmd, rows, cols).unwrap();
         let framed = tokio_util::codec::Framed::new(pipe.1, server_codec());
         let (tx, rx) = framed.split();
-        (pty, Box::pin(tx), Box::pin(rx))
+        (pty, Box::pin(tx), Box::pin(rx.fuse()))
     }
 
     async fn handle_runner(
@@ -208,7 +216,7 @@ impl Server {
         shared: Arc<ProcessShared>,
         lru: Arc<RwLock<VecList<u32>>>,
         mut client_rx: Receiver<(Client, bool)>,
-        mut event: Pin<Box<dyn Stream<Item = std::io::Result<RunnerEvent>> + Send + Sync>>,
+        mut event: Pin<Box<dyn FusedStream<Item = std::io::Result<RunnerEvent>> + Send + Sync>>,
     ) -> std::io::Result<()> {
         use tokio::io::AsyncReadExt;
         let pty = shared.pty.get_raw_handle().unwrap().into_raw_fd();
@@ -225,15 +233,29 @@ impl Server {
             tokio::io::split(OptionIo::<UnixStream>::default());
         macro_rules! disconnect_client {
             () => {
-                tracing::info!("client disconnected");
+                tracing::info!(
+                    "disconnecting the client, was connected: {}",
+                    shared.client_connected.load(Ordering::Relaxed)
+                );
                 (client_read, client_write) = tokio::io::split(None.into());
                 client_event = None;
                 shared.client_connected.store(false, Ordering::Relaxed);
             };
         }
-        loop {
+        let mut verdict = ProcessState::Running;
+
+        // Handle client and/or runner messages until we are reaped.
+        // We will only be reaped when all of the following are true:
+        //  - the client is connected
+        //  - the client_write_buf is empty
+        //  - the runner finished
+        //
+        // We also want to send the final process state to the client after we have
+        // flushed the client_write_buf, so we only send that after we are out
+        // of the while loop.
+        while !shared.reaped.load(Ordering::Relaxed) {
             select! {
-                ready = pty.readable() => {
+                ready = pty.readable(), if !verdict.is_terminated() => {
                     let mut ready = ready?;
                     if let Ok(nbytes) = ready.try_io(|inner| {
                         let nbytes = nix::unistd::read(*inner.get_ref(), &mut pty_read_buf[..])?;
@@ -247,7 +269,7 @@ impl Server {
                         client_write_buf.put_slice(&pty_read_buf[..nbytes]);
                     }
                 },
-                ready = pty.writable(), if !pty_write_buf.is_empty() => {
+                ready = pty.writable(), if !pty_write_buf.is_empty() && !verdict.is_terminated()=> {
                     let mut ready = ready?;
                     if let Ok(nbytes) = ready.try_io(|inner| {
                         let nbytes = nix::unistd::write(*inner.get_ref(), &pty_write_buf[..])?;
@@ -272,6 +294,9 @@ impl Server {
                     }
                     tracing::info!("Sent {nbytes} bytes to the client");
                     client_write_buf.advance(nbytes);
+                    if verdict.is_terminated() && client_write_buf.is_empty() {
+                        shared.reaped.store(true, Ordering::Relaxed);
+                    }
                 },
                 nbytes = client_read.read(&mut client_read_buf[..]) => {
                     tracing::debug!("client read {nbytes:?}");
@@ -295,6 +320,9 @@ impl Server {
                     if !with_output {
                         client_write_buf.clear();
                     }
+                    if verdict.is_terminated() && client_write_buf.is_empty(){
+                        shared.reaped.store(true, Ordering::Relaxed);
+                    }
                 },
                 req = OptionFuture::from(client_event.as_mut().map(|e| e.next())), if client_event.is_some() => {
                     let req = req.unwrap();
@@ -313,9 +341,11 @@ impl Server {
                         continue;
                     }
                 },
-                e = event.next() => match e {
+                e = event.next(), if !event.is_terminated() => match e {
                     Some(Ok(RunnerEvent::StateChanged(e, _))) => {
-                        let finished = matches!(e, ProcessState::Terminated(_));
+                        if e.is_terminated() {
+                            verdict = e;
+                        }
                         *shared.state.write().await = e;
                         let ev = match e {
                             ProcessState::Stopped => {
@@ -334,22 +364,31 @@ impl Server {
                                 continue
                             },
                         };
+
+                        // New process state is Stopped or Terminated.
+
                         if let Some(client_event) = &mut client_event {
-                            tracing::info!("Sending {ev:?} to the client");
-                            let _ = client_event.send(ev).await;
-                            let _ = client_event.flush().await;
-                            tracing::info!("Sent");
-                            if finished {
-                                // The process finished when the client is connected, we
-                                // can reap this process immediately
-                                shared.reaped.store(true, Ordering::Relaxed);
-                                lru.write().await.remove(shared.key).unwrap();
+                            // We are going to detach the client, so try to flush client_write_buf first.
+                            //
+                            // this is best effort, because the client could disconnect as we try
+                            // to send data, in that case, we will disconnect the client and not
+                            // reap ourself.
+                            let mut client_data = client_read.unsplit(client_write).into_inner().unwrap();
+                            if client_data.write_all(&client_write_buf[..]).await.is_ok() {
+                                client_write_buf.clear();
+
+                                tracing::info!("Sending {ev:?} to the client");
+                                let sent = client_event.send(ev).await.is_ok();
+                                let sent = sent && client_event.flush().await.is_ok();
+                                if sent && verdict.is_terminated() {
+                                    // The process terminated while the client is connected, we
+                                    // can reap this process immediately
+                                    shared.reaped.store(true, Ordering::Relaxed);
+                                }
                             }
                         }
+
                         disconnect_client!();
-                        if finished {
-                            break;
-                        }
 
                         let mut lru = lru.write().await;
                         let head = lru.indices().next().unwrap();
@@ -362,12 +401,23 @@ impl Server {
                         return Err(e)
                     },
                     None => {
+                        assert!(verdict.is_terminated(), "Runner terminated unexpectedly");
                         tracing::info!("Runner disconnected");
-                        break
                     }
                 }
             }
         }
+
+        let _ = client_read.unsplit(client_write);
+        if let Some(mut client_event) = client_event {
+            tracing::info!("Sending final process state {verdict:?} to the client");
+            let _ = client_event
+                .send(protocol::Event::StateChanged { id, state: verdict })
+                .await;
+            let _ = client_event.flush().await;
+        }
+        // The job has been reaped, remove it from the list
+        lru.write().await.remove(shared.key).unwrap();
         tracing::info!("Runner task finished");
         Ok(())
     }
@@ -409,7 +459,10 @@ impl Server {
             ))
             .await
             .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "cannot send to runner task")
+                std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "Client task has stopped unexpectedly",
+                )
             })
             .unwrap();
     }
@@ -476,13 +529,11 @@ impl Server {
 
                 Self::setup_data_channel(id, slot, stream, false).await;
 
-                tokio::spawn(Self::handle_runner(
-                    id,
-                    shared,
-                    lru.clone(),
-                    client_channel.1,
-                    evt,
-                ));
+                tokio::spawn(async move {
+                    Self::handle_runner(id, shared, lru.clone(), client_channel.1, evt)
+                        .await
+                        .unwrap()
+                });
             },
             protocol::Request::Resume { id, with_output } => {
                 use protocol::{Error, Event};
@@ -543,6 +594,7 @@ impl Server {
                 if need_resuming {
                     slot.ctl.send(RunnerRequest::Resume).await?;
                 }
+                tracing::info!("Client is reconnecting to job {id}");
                 Self::setup_data_channel(id, slot, stream, with_output).await;
             },
             protocol::Request::WindowSize { .. } => {

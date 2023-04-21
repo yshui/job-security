@@ -4,7 +4,7 @@ authors = ["Yuxuan Shui <yshuiv7@gmail.com>"]
 description = "Universal job control - client library"
 categories = ["command-line-utilities"]
 repository = "https://github.com/yshui/job-security"
-version = "0.1.0"
+version = "0.1.1"
 license = "MPL-2.0"
 edition = "2021"
 
@@ -12,7 +12,7 @@ edition = "2021"
 futures-util = { workspace = true, features = ["sink"] }
 libc.workspace = true
 nix = { workspace = true, features = ["term", "user", "socket", "uio", "signal", "ioctl"] }
-protocol = { version = "0.1.0", path = "../protocol", package = "job-security-protocol" }
+protocol = { version = "0.1.1", path = "../protocol", package = "job-security-protocol" }
 tokio = { workspace = true, features = ["net", "io-util", "io-std", "macros", "signal"] }
 tokio-util = { workspace = true, features = ["codec"] }
 tracing.workspace = true

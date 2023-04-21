@@ -24,6 +24,9 @@ impl<T> OptionIo<T> {
     fn project(self: Pin<&mut Self>) -> Pin<&mut Option<T>> {
         unsafe { self.map_unchecked_mut(|s| &mut s.0) }
     }
+    pub(crate) fn into_inner(self) -> Option<T> {
+        self.0
+    }
 }
 
 impl<T: AsyncRead> AsyncRead for OptionIo<T> {

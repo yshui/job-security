@@ -48,6 +48,12 @@ pub enum ProcessState {
     Terminated(ExitStatus),
 }
 
+impl ProcessState {
+    pub fn is_terminated(&self) -> bool {
+        matches!(self, ProcessState::Terminated(_))
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Process {
     pub id:        u32,
