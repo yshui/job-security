@@ -274,7 +274,7 @@ impl Server {
                         Ok(nbytes)
                     }) {
                         let nbytes = nbytes?;
-                        tracing::info!("Sent {nbytes} bytes to the pty");
+                        tracing::debug!("Sent {nbytes} bytes to the pty");
                         pty_write_buf.advance(nbytes);
                     }
                     false
@@ -283,7 +283,7 @@ impl Server {
                     match nbytes {
                         Ok(0) | Err(_) => true,
                         Ok(nbytes) => {
-                            tracing::info!("Sent {nbytes} bytes to the client");
+                            tracing::debug!("Sent {nbytes} bytes to the client");
                             client_write_buf.advance(nbytes);
                             false
                         }
@@ -330,6 +330,7 @@ impl Server {
                 },
                 e = event.next(), if !event.is_terminated() => match e {
                     Some(Ok(RunnerEvent::StateChanged(e, _))) => {
+                        tracing::info!("New runner state: {e:?}");
                         *shared.state.write().await = e;
                         match e {
                             ProcessState::Stopped => {
