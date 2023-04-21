@@ -464,7 +464,7 @@ impl Server {
                     command,
                     state: RwLock::new(ProcessState::Running),
                     reaped: false.into(),
-                    client_connected: AtomicBool::new(false),
+                    client_connected: AtomicBool::new(true),
                     pty,
                     size: RwLock::new((cols, rows)),
                 });
