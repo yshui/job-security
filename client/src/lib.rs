@@ -178,7 +178,7 @@ impl Client {
                     .unwrap();
             }
         });
-        std::thread::spawn(move || {
+        let stdout_thread = std::thread::spawn(move || {
             let mut stdout_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> = stdout_rx;
             while let Some(data) = stdout_rx.blocking_recv() {
                 let mut data = &data[..];
@@ -265,6 +265,9 @@ impl Client {
                 }
             }
         }
+        drop(stdout_tx);
+        stdout_thread.join().unwrap();
+
         drop(_guard);
 
         tracing::debug!("Connection closed, totoal received: {total_received}");
