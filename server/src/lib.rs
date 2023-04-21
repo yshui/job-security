@@ -231,31 +231,21 @@ impl Server {
         let mut client_event: Option<Framed<WithFd<UnixStream>, protocol::DynServerCodec>> = None;
         let (mut client_read, mut client_write) =
             tokio::io::split(OptionIo::<UnixStream>::default());
-        macro_rules! disconnect_client {
-            () => {
-                tracing::info!(
-                    "disconnecting the client, was connected: {}",
-                    shared.client_connected.load(Ordering::Relaxed)
-                );
-                (client_read, client_write) = tokio::io::split(None.into());
-                client_event = None;
-                shared.client_connected.store(false, Ordering::Relaxed);
-            };
-        }
         let mut verdict = ProcessState::Running;
 
         // Handle client and/or runner messages until we are reaped.
         // We will only be reaped when all of the following are true:
         //  - the client is connected
-        //  - the client_write_buf is empty
+        //  - the client_write_buf is empty && pty_read_finished is true
         //  - the runner finished
         //
         // We also want to send the final process state to the client after we have
         // flushed the client_write_buf, so we only send that after we are out
         // of the while loop.
+        let mut pty_read_finished = false;
         while !shared.reaped.load(Ordering::Relaxed) {
-            select! {
-                ready = pty.readable(), if !verdict.is_terminated() => {
+            let mut disconnect_client = select! {
+                ready = pty.readable(), if !pty_read_finished => {
                     let mut ready = ready?;
                     if let Ok(nbytes) = ready.try_io(|inner| {
                         let nbytes = nix::unistd::read(*inner.get_ref(), &mut pty_read_buf[..])?;
@@ -264,10 +254,15 @@ impl Server {
                         }
                         Ok(nbytes)
                     }) {
-                        let nbytes = nbytes?;
-                        client_write_buf.reserve(nbytes);
-                        client_write_buf.put_slice(&pty_read_buf[..nbytes]);
+                        if let Ok(nbytes) = nbytes {
+                            client_write_buf.reserve(nbytes);
+                            client_write_buf.put_slice(&pty_read_buf[..nbytes]);
+                        } else {
+                            tracing::info!("Read everything from pty");
+                            pty_read_finished = true;
+                        }
                     }
+                    false
                 },
                 ready = pty.writable(), if !pty_write_buf.is_empty() && !verdict.is_terminated()=> {
                     let mut ready = ready?;
@@ -282,34 +277,28 @@ impl Server {
                         tracing::info!("Sent {nbytes} bytes to the pty");
                         pty_write_buf.advance(nbytes);
                     }
+                    false
                 },
                 nbytes = client_write.write(&client_write_buf[..]), if !client_write_buf.is_empty() => {
-                    let Ok(nbytes) = nbytes else {
-                        disconnect_client!();
-                        continue;
-                    };
-                    if nbytes == 0 {
-                        disconnect_client!();
-                        continue;
-                    }
-                    tracing::info!("Sent {nbytes} bytes to the client");
-                    client_write_buf.advance(nbytes);
-                    if verdict.is_terminated() && client_write_buf.is_empty() {
-                        shared.reaped.store(true, Ordering::Relaxed);
+                    match nbytes {
+                        Ok(0) | Err(_) => true,
+                        Ok(nbytes) => {
+                            tracing::info!("Sent {nbytes} bytes to the client");
+                            client_write_buf.advance(nbytes);
+                            false
+                        }
                     }
                 },
                 nbytes = client_read.read(&mut client_read_buf[..]) => {
                     tracing::debug!("client read {nbytes:?}");
-                    let Ok(nbytes) = nbytes else {
-                        disconnect_client!();
-                        continue;
-                    };
-                    if nbytes == 0 {
-                        disconnect_client!();
-                        continue;
+                    match nbytes {
+                        Ok(0) | Err(_) => true,
+                        Ok(nbytes) => {
+                            pty_write_buf.reserve(nbytes);
+                            pty_write_buf.put_slice(&client_read_buf[..nbytes]);
+                            false
+                        }
                     }
-                    pty_write_buf.reserve(nbytes);
-                    pty_write_buf.put_slice(&client_read_buf[..nbytes]);
                 },
                 new_client = client_rx.recv() => {
                     assert!(client_event.is_none());
@@ -320,9 +309,7 @@ impl Server {
                     if !with_output {
                         client_write_buf.clear();
                     }
-                    if verdict.is_terminated() && client_write_buf.is_empty(){
-                        shared.reaped.store(true, Ordering::Relaxed);
-                    }
+                    false
                 },
                 req = OptionFuture::from(client_event.as_mut().map(|e| e.next())), if client_event.is_some() => {
                     let req = req.unwrap();
@@ -336,64 +323,63 @@ impl Server {
                                 .send(protocol::Event::Error(protocol::Error::InvalidRequest))
                                 .await?;
                         }
+                        false
                     } else {
-                        disconnect_client!();
-                        continue;
+                        true
                     }
                 },
                 e = event.next(), if !event.is_terminated() => match e {
                     Some(Ok(RunnerEvent::StateChanged(e, _))) => {
-                        if e.is_terminated() {
-                            verdict = e;
-                        }
                         *shared.state.write().await = e;
-                        let ev = match e {
+                        match e {
                             ProcessState::Stopped => {
-                                protocol::Event::StateChanged { id, state: ProcessState::Stopped }
+                                // New process state is Stopped.
+
+                                if let Some(client_event) = &mut client_event {
+                                    // We are going to detach the client, so try to flush client_write_buf first.
+                                    //
+                                    // this is best effort, because the client could disconnect as we try
+                                    // to send data, in that case, we will disconnect the client and not
+                                    // reap ourself.
+                                    let mut client_data = client_read.unsplit(client_write).into_inner().unwrap();
+                                    if client_data.write_all(&client_write_buf[..]).await.is_ok() {
+                                        client_write_buf.clear();
+
+                                        tracing::info!("Sending Stopped to the client");
+                                        let sent = client_event.send(protocol::Event::StateChanged {
+                                            id, state: ProcessState::Stopped
+                                        }).await.is_ok();
+                                        let sent = sent && client_event.flush().await.is_ok();
+                                        if sent && verdict.is_terminated() {
+                                            // The process terminated while the client is connected, we
+                                            // can reap this process immediately
+                                            shared.reaped.store(true, Ordering::Relaxed);
+                                        }
+                                    }
+                                }
+
+                                // Fix use of partially move client_read/client_write
+                                (client_read, client_write) = tokio::io::split(None.into());
+
+                                let mut lru = lru.write().await;
+                                let head = lru.indices().next().unwrap();
+                                if head != shared.key {
+                                    lru.move_before(shared.key, head);
+                                }
+                                true
                             },
-                            ProcessState::Terminated(status) => protocol::Event::StateChanged {
-                                id, state: ProcessState::Terminated(status)
+                            ProcessState::Terminated(_) => {
+                                verdict = e;
+                                false
                             },
                             ProcessState::Running => {
                                 if let Some(client_event) = &mut client_event {
                                     let (cols, rows) = *shared.size.read().await;
-                                    if client_event.send(protocol::Event::WindowSize { cols, rows }).await.is_err() {
-                                        disconnect_client!();
-                                    };
+                                    client_event.send(protocol::Event::WindowSize { cols, rows }).await.is_err()
+                                } else {
+                                    false
                                 }
-                                continue
                             },
-                        };
-
-                        // New process state is Stopped or Terminated.
-
-                        if let Some(client_event) = &mut client_event {
-                            // We are going to detach the client, so try to flush client_write_buf first.
-                            //
-                            // this is best effort, because the client could disconnect as we try
-                            // to send data, in that case, we will disconnect the client and not
-                            // reap ourself.
-                            let mut client_data = client_read.unsplit(client_write).into_inner().unwrap();
-                            if client_data.write_all(&client_write_buf[..]).await.is_ok() {
-                                client_write_buf.clear();
-
-                                tracing::info!("Sending {ev:?} to the client");
-                                let sent = client_event.send(ev).await.is_ok();
-                                let sent = sent && client_event.flush().await.is_ok();
-                                if sent && verdict.is_terminated() {
-                                    // The process terminated while the client is connected, we
-                                    // can reap this process immediately
-                                    shared.reaped.store(true, Ordering::Relaxed);
-                                }
-                            }
-                        }
-
-                        disconnect_client!();
-
-                        let mut lru = lru.write().await;
-                        let head = lru.indices().next().unwrap();
-                        if head != shared.key {
-                            lru.move_before(shared.key, head);
                         }
                     },
                     Some(Err(e)) => {
@@ -401,21 +387,46 @@ impl Server {
                         return Err(e)
                     },
                     None => {
-                        assert!(verdict.is_terminated(), "Runner terminated unexpectedly");
                         tracing::info!("Runner disconnected");
+                        assert!(verdict.is_terminated(), "Runner terminated unexpectedly");
+                        false
                     }
                 }
+            };
+            if verdict.is_terminated() &&
+                client_write_buf.is_empty() &&
+                pty_read_finished &&
+                shared.client_connected.load(Ordering::Relaxed)
+            {
+                // The job has terminated, and we have read and sent all the output data.
+                // Now try to send the final verdict, if successful, we can reap the process
+                let mut client_event = client_event.take().unwrap();
+                tracing::info!("Sending final process state {verdict:?} to the client");
+                let sent = client_event
+                    .send(protocol::Event::StateChanged { id, state: verdict })
+                    .await
+                    .is_ok();
+                let sent = sent && client_event.flush().await.is_ok();
+                if sent {
+                    shared.reaped.store(true, Ordering::Relaxed);
+                } // else {
+                  //    The client disconnected, we keep waiting until the client reconnects.
+                  // }
+
+                // either way, we disconnect the client for now
+                disconnect_client = true;
+            }
+            if disconnect_client {
+                tracing::info!(
+                    "disconnecting the client, was connected: {}",
+                    shared.client_connected.load(Ordering::Relaxed)
+                );
+                (client_read, client_write) = tokio::io::split(None.into());
+                client_event = None;
+                shared.client_connected.store(false, Ordering::Relaxed);
             }
         }
 
-        let _ = client_read.unsplit(client_write);
-        if let Some(mut client_event) = client_event {
-            tracing::info!("Sending final process state {verdict:?} to the client");
-            let _ = client_event
-                .send(protocol::Event::StateChanged { id, state: verdict })
-                .await;
-            let _ = client_event.flush().await;
-        }
         // The job has been reaped, remove it from the list
         lru.write().await.remove(shared.key).unwrap();
         tracing::info!("Runner task finished");
