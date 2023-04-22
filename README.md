@@ -8,6 +8,14 @@ It also supplements shells that doesn't natively support job control, such as nu
 
 ![termtosvg_053kx7nv](https://user-images.githubusercontent.com/366851/233362873-b7ad80e9-8571-4236-a477-5b24b04f2261.svg)
 
+## Features
+
+- normal job control stuff: stopping things and putting them into the background, and resuming them later.
+- job mobility: jobs are not tied to a terminal, you can resume stopped jobs wherever you want.
+- starting/resuming jobs in the background.
+- monitoring job statuses.
+- preserving and retrieving logs from background jobs. output from background jobs won't invade your shell, and can be easily retrieved when needed.
+
 ## Installation
 
 ```bash
