@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "job-security"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "clap",
  "daemonize",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "job-security-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "bincode",
  "dlv-list",
