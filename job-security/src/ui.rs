@@ -1,10 +1,12 @@
-use std::{collections::HashMap, ops::Deref};
+use std::ops::Deref;
 
 use protocol::ExitStatus;
 use tabled::{
     grid::{
         color::AnsiColor,
-        config::{AlignmentHorizontal, ColoredConfig, Entity, Indent, Sides, SpannedConfig},
+        config::{
+            AlignmentHorizontal, ColorMap, ColoredConfig, Entity, Indent, Sides, SpannedConfig,
+        },
         dimension::{CompleteDimension, Estimate},
         records::vec_records::VecRecords,
     },
@@ -161,7 +163,7 @@ pub(crate) type Table = tabled::grid::Grid<
     VecRecords<ColoredString>,
     CompleteDimension<'static>,
     SpannedConfig,
-    HashMap<(usize, usize), AnsiColor<'static>>,
+    ColorMap,
 >;
 impl PrettyProcesses {
     fn records(&self) -> Vec<Vec<ColoredString>> {
@@ -182,17 +184,16 @@ impl PrettyProcesses {
     }
 
     pub(crate) fn grid(&self) -> Table {
-        let mut colors = HashMap::new();
+        let mut config = ColoredConfig::new(SpannedConfig::default());
         let records = self.records();
         for (r, row) in records.iter().enumerate() {
             for (c, cell) in row.iter().enumerate() {
-                colors.insert((r, c), cell.color());
+                config.set_color((r, c).into(), cell.color());
             }
         }
         let mut records = VecRecords::new(records);
 
         let mut dimension = CompleteDimension::default();
-        let mut config = ColoredConfig::new(SpannedConfig::default(), colors);
         config.set_alignment_horizontal(Entity::Global, AlignmentHorizontal::Right);
         for entity in Rows::new(0..=0).cells(&records) {
             config.set_alignment_horizontal(entity, AlignmentHorizontal::Center);
@@ -202,8 +203,8 @@ impl PrettyProcesses {
             right: Indent::spaced(1),
             ..Default::default()
         });
-        dimension.estimate(&records, &config);
         tabled::settings::Style::rounded().change(&mut records, &mut config, &mut dimension);
+        dimension.estimate(&records, &config);
 
         tabled::grid::Grid::new(
             records,
