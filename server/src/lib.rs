@@ -340,23 +340,22 @@ impl Server {
                                     // We are going to detach the client, so try to flush client_write_buf first.
                                     //
                                     // this is best effort, because the client could disconnect as we try
-                                    // to send data, in that case, we will disconnect the client and not
-                                    // reap ourself.
+                                    // to send data.
                                     let mut client_data = client_read.unsplit(client_write).into_inner().unwrap();
-                                    if client_data.write_all(&client_write_buf[..]).await.is_ok() {
-                                        client_write_buf.clear();
-
-                                        tracing::info!("Sending Stopped to the client");
-                                        let sent = client_event.send(protocol::Event::StateChanged {
-                                            id, state: ProcessState::Stopped
-                                        }).await.is_ok();
-                                        let sent = sent && client_event.flush().await.is_ok();
-                                        if sent && verdict.is_terminated() {
-                                            // The process terminated while the client is connected, we
-                                            // can reap this process immediately
-                                            shared.reaped.store(true, Ordering::Relaxed);
+                                    while !client_write_buf.is_empty() {
+                                        match client_data.write(&client_write_buf[..]).await {
+                                            Ok(0) | Err(_) => break,
+                                            Ok(n) => {
+                                                client_write_buf.advance(n);
+                                            }
                                         }
                                     }
+
+                                    tracing::info!("Sending Stopped to the client");
+                                    let _ = client_event.send(protocol::Event::StateChanged {
+                                        id, state: ProcessState::Stopped
+                                    }).await;
+                                    let _ = client_event.flush().await;
                                 }
 
                                 // Fix use of partially move client_read/client_write
