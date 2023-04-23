@@ -395,7 +395,7 @@ impl Server {
             };
             if verdict.is_terminated() &&
                 client_write_buf.is_empty() &&
-                shared.client_connected.load(Ordering::Relaxed)
+                shared.client_connected.load(Ordering::Acquire)
             {
                 if pty
                     .poll_read_ready(&mut std::task::Context::from_waker(
@@ -433,7 +433,7 @@ impl Server {
                 );
                 (client_read, client_write) = tokio::io::split(None.into());
                 client_event = None;
-                shared.client_connected.store(false, Ordering::Relaxed);
+                shared.client_connected.store(false, Ordering::Release);
             }
         }
 
@@ -566,8 +566,8 @@ impl Server {
                         let mut latest = None;
                         for id in lru.iter().copied() {
                             let Some(slot) = processes_read[id as usize].as_ref() else { continue };
-                            if !slot.shared.reaped.load(Ordering::Relaxed) &&
-                                !slot.shared.client_connected.load(Ordering::Relaxed)
+                            if !slot.shared.client_connected.load(Ordering::Acquire) &&
+                                !slot.shared.reaped.load(Ordering::Relaxed)
                             {
                                 latest = Some(id);
                             }
@@ -627,11 +627,11 @@ impl Server {
                 let processes = processes.read().await;
                 for (id, process) in processes.iter().enumerate() {
                     let Some(process) = process else { continue };
+                    let connected = process.shared.client_connected.load(Ordering::Acquire);
                     if process.shared.reaped.load(Ordering::Relaxed) {
                         continue
                     }
                     let state = *process.shared.state.read().await;
-                    let connected = process.shared.client_connected.load(Ordering::Relaxed);
                     tracing::info!("Sending process {id} {state:?} {connected}");
                     stream
                         .send(protocol::Event::Process(protocol::Process {
