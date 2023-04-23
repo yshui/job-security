@@ -258,7 +258,7 @@ impl Server {
                             client_write_buf.reserve(nbytes);
                             client_write_buf.put_slice(&pty_read_buf[..nbytes]);
                         } else {
-                            tracing::info!("Read everything from pty");
+                            tracing::info!("Read everything from pty, read resulted in error.");
                             pty_read_finished = true;
                         }
                     }
@@ -396,26 +396,36 @@ impl Server {
             };
             if verdict.is_terminated() &&
                 client_write_buf.is_empty() &&
-                pty_read_finished &&
                 shared.client_connected.load(Ordering::Relaxed)
             {
-                // The job has terminated, and we have read and sent all the output data.
-                // Now try to send the final verdict, if successful, we can reap the process
-                let mut client_event = client_event.take().unwrap();
-                tracing::info!("Sending final process state {verdict:?} to the client");
-                let sent = client_event
-                    .send(protocol::Event::StateChanged { id, state: verdict })
-                    .await
-                    .is_ok();
-                let sent = sent && client_event.flush().await.is_ok();
-                if sent {
-                    shared.reaped.store(true, Ordering::Relaxed);
-                } // else {
-                  //    The client disconnected, we keep waiting until the client reconnects.
-                  // }
+                if pty
+                    .poll_read_ready(&mut std::task::Context::from_waker(
+                        futures_util::task::noop_waker_ref(),
+                    ))
+                    .is_pending()
+                {
+                    tracing::info!("Read everything from pty");
+                    pty_read_finished = true;
+                }
+                if pty_read_finished {
+                    // The job has terminated, and we have read and sent all the output data.
+                    // Now try to send the final verdict, if successful, we can reap the process
+                    let mut client_event = client_event.take().unwrap();
+                    tracing::info!("Sending final process state {verdict:?} to the client");
+                    let sent = client_event
+                        .send(protocol::Event::StateChanged { id, state: verdict })
+                        .await
+                        .is_ok();
+                    let sent = sent && client_event.flush().await.is_ok();
+                    if sent {
+                        shared.reaped.store(true, Ordering::Relaxed);
+                    } // else {
+                      //    The client disconnected, we keep waiting until the client reconnects.
+                      // }
 
-                // either way, we disconnect the client for now
-                disconnect_client = true;
+                    // either way, we disconnect the client for now
+                    disconnect_client = true;
+                }
             }
             if disconnect_client {
                 tracing::info!(
