@@ -1,22 +1,28 @@
 #![allow(dead_code)]
-pub use nix::errno;
-pub use nix::sys::signal::Signal;
-pub use nix::sys::wait::WaitStatus;
-pub use nix::Error;
+use std::{
+    fs::File,
+    os::{
+        fd::OwnedFd,
+        unix::prelude::{AsRawFd, FromRawFd, RawFd},
+    },
+    thread,
+    time::{self, Duration},
+};
 
-use nix::fcntl::{open, OFlag};
-use nix::libc::{self, winsize, STDIN_FILENO, STDOUT_FILENO};
-use nix::pty::PtyMaster;
-use nix::pty::{grantpt, posix_openpt, unlockpt};
-use nix::sys::stat::Mode;
-use nix::sys::termios;
-use nix::unistd::{close, dup, isatty, setsid};
-use nix::{ioctl_write_ptr_bad, Result};
-use std::fs::File;
-use std::os::fd::OwnedFd;
-use std::os::unix::prelude::{AsRawFd, FromRawFd, RawFd};
-use std::thread;
-use std::time::{self, Duration};
+pub use nix::{
+    errno,
+    sys::{signal::Signal, wait::WaitStatus},
+    Error,
+};
+use nix::{
+    fcntl::{open, OFlag},
+    ioctl_write_ptr_bad,
+    libc::{self, winsize, STDIN_FILENO, STDOUT_FILENO},
+    pty::{grantpt, posix_openpt, unlockpt, PtyMaster},
+    sys::{stat::Mode, termios},
+    unistd::{close, dup, isatty, setsid},
+    Result,
+};
 use termios::SpecialCharacterIndices;
 use tokio::process::Command;
 
@@ -30,9 +36,9 @@ const DEFAULT_TERMINATE_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 pub struct PtyProcess {
-    master: Master,
-    eof_char: u8,
-    intr_char: u8,
+    master:          Master,
+    eof_char:        u8,
+    intr_char:       u8,
     terminate_delay: Duration,
 }
 
@@ -42,7 +48,7 @@ impl PtyProcess {
     /// ```no_run
     ///   # use std::process::Command;
     ///   # use ptyprocess::PtyProcess;
-    ///     let proc = PtyProcess::spawn(Command::new("bash"));
+    /// let proc = PtyProcess::spawn(Command::new("bash"));
     /// ```
     pub fn spawn(
         mut command: Command,
@@ -131,7 +137,7 @@ impl PtyProcess {
         let now = time::Instant::now();
         while timeout.is_none() || now.elapsed() < timeout.unwrap() {
             if on == self.get_echo()? {
-                return Ok(true);
+                return Ok(true)
             }
 
             thread::sleep(Duration::from_millis(100));
@@ -145,8 +151,8 @@ fn set_term_size(fd: i32, cols: u16, rows: u16) -> Result<()> {
     ioctl_write_ptr_bad!(_set_window_size, libc::TIOCSWINSZ, winsize);
 
     let size = winsize {
-        ws_row: rows,
-        ws_col: cols,
+        ws_row:    rows,
+        ws_col:    cols,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -160,8 +166,8 @@ fn get_term_size(fd: i32) -> Result<(u16, u16)> {
     nix::ioctl_read_bad!(_get_window_size, libc::TIOCGWINSZ, winsize);
 
     let mut size = winsize {
-        ws_col: 0,
-        ws_row: 0,
+        ws_col:    0,
+        ws_row:    0,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -179,6 +185,11 @@ struct Master {
 impl Master {
     fn open() -> Result<Self> {
         let master_fd = posix_openpt(OFlag::O_RDWR)?;
+        // Set close-on-exec flag
+        nix::fcntl::fcntl(
+            master_fd.as_raw_fd(),
+            nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+        )?;
         Ok(Self { fd: master_fd })
     }
 
@@ -246,7 +257,7 @@ pub fn set_raw(fd: RawFd) -> Result<()> {
 fn get_this_term_char(char: SpecialCharacterIndices) -> Option<u8> {
     for &fd in &[STDIN_FILENO, STDOUT_FILENO] {
         if let Ok(char) = get_term_char(fd, char) {
-            return Some(char);
+            return Some(char)
         }
     }
 
@@ -278,12 +289,13 @@ fn make_controlling_tty(pts_name: &str) -> Result<()> {
     match fd {
         Ok(fd) => {
             close(fd)?;
-        }
+        },
         Err(Error::ENXIO) => {
             // Sometimes we get ENXIO right here which 'probably' means
             // that we has been already disconnected from controlling tty.
-            // Specifically it was discovered on ubuntu-latest Github CI platform.
-        }
+            // Specifically it was discovered on ubuntu-latest Github CI
+            // platform.
+        },
         Err(err) => return Err(err),
     }
 
@@ -295,11 +307,11 @@ fn make_controlling_tty(pts_name: &str) -> Result<()> {
     // it again.  We expect that OSError of ENXIO should always be raised.
     let fd = open("/dev/tty", OFlag::O_RDWR | OFlag::O_NOCTTY, Mode::empty());
     match fd {
-        Err(Error::ENXIO) => {} // ok
+        Err(Error::ENXIO) => {}, // ok
         Ok(fd) => {
             close(fd)?;
-            return Err(Error::ENOTSUP);
-        }
+            return Err(Error::ENOTSUP)
+        },
         Err(_) => return Err(Error::ENOTSUP),
     }
 
