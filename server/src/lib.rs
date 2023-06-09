@@ -2,7 +2,7 @@ mod pty;
 use std::{
     ffi::{OsStr, OsString},
     os::{
-        fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd},
+        fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
         unix::process::CommandExt,
     },
     path::Path,
@@ -219,11 +219,12 @@ impl Server {
         mut event: Pin<Box<dyn FusedStream<Item = std::io::Result<RunnerEvent>> + Send + Sync>>,
     ) -> std::io::Result<()> {
         use tokio::io::AsyncReadExt;
-        let pty = shared.pty.get_raw_handle().unwrap().into_raw_fd();
+        let pty: OwnedFd = shared.pty.get_raw_handle().unwrap().into();
+        tracing::debug!("fd dup'd to {}", pty.as_raw_fd());
         let mut pty_write_buf = BytesMut::with_capacity(1024);
-        let flags = nix::fcntl::fcntl(pty, nix::fcntl::FcntlArg::F_GETFL).unwrap();
+        let flags = nix::fcntl::fcntl(pty.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL).unwrap();
         let flags = nix::fcntl::OFlag::from_bits_truncate(flags) | nix::fcntl::OFlag::O_NONBLOCK;
-        nix::fcntl::fcntl(pty, nix::fcntl::FcntlArg::F_SETFL(flags)).unwrap();
+        nix::fcntl::fcntl(pty.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(flags)).unwrap();
         let pty = tokio::io::unix::AsyncFd::new(pty).unwrap();
         let mut pty_read_buf = [0u8; 1024];
         let mut client_read_buf = [0u8; 1024];
@@ -248,7 +249,7 @@ impl Server {
                 ready = pty.readable(), if !pty_read_finished => {
                     let mut ready = ready?;
                     if let Ok(nbytes) = ready.try_io(|inner| {
-                        let nbytes = nix::unistd::read(*inner.get_ref(), &mut pty_read_buf[..])?;
+                        let nbytes = nix::unistd::read(inner.get_ref().as_raw_fd(), &mut pty_read_buf[..])?;
                         if nbytes == 0 {
                             return Err(std::io::ErrorKind::WouldBlock.into());
                         }
@@ -267,7 +268,7 @@ impl Server {
                 ready = pty.writable(), if !pty_write_buf.is_empty() && !verdict.is_terminated()=> {
                     let mut ready = ready?;
                     if let Ok(nbytes) = ready.try_io(|inner| {
-                        let nbytes = nix::unistd::write(*inner.get_ref(), &pty_write_buf[..])?;
+                        let nbytes = nix::unistd::write(inner.get_ref().as_raw_fd(), &pty_write_buf[..])?;
                         if nbytes == 0 {
                             return Err(std::io::ErrorKind::WouldBlock.into());
                         }
