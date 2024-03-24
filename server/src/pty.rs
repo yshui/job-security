@@ -9,11 +9,7 @@ use std::{
     time::{self, Duration},
 };
 
-pub use nix::{
-    errno,
-    sys::{signal::Signal, wait::WaitStatus},
-    Error,
-};
+pub use nix::Error;
 use nix::{
     fcntl::{open, OFlag},
     ioctl_write_ptr_bad,
@@ -44,12 +40,6 @@ pub struct PtyProcess {
 
 impl PtyProcess {
     /// Spawns a child process and create a [PtyProcess].
-    ///
-    /// ```no_run
-    ///   # use std::process::Command;
-    ///   # use ptyprocess::PtyProcess;
-    /// let proc = PtyProcess::spawn(Command::new("bash"));
-    /// ```
     pub fn spawn(
         mut command: Command,
         rows: u16,
