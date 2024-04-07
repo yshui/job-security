@@ -13,7 +13,7 @@ bincode.workspace = true
 dlv-list = "0.5.0"
 futures-util = { workspace = true, features = ["sink", "alloc"] }
 indexmap = "1.9.3"
-nix = { workspace = true, features = ["term", "process", "ioctl", "fs"] }
+nix = { workspace = true, features = ["term", "process", "ioctl", "fs", "signal", "user"] }
 protocol = { version = "0.1.1", path = "../protocol", package = "job-security-protocol" }
 serde = { version = "1.0.160", features = ["derive"] }
 tokio = { workspace = true, features = ["process", "net", "fs", "macros", "signal", "rt", "io-util"] }
