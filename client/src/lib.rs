@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{os::fd::AsRawFd, path::Path};
 
 use futures_util::{future::OptionFuture, SinkExt, StreamExt};
 use protocol::ProcessState;
@@ -19,8 +19,12 @@ struct TerminalStateGuard {
 
 impl Drop for TerminalStateGuard {
     fn drop(&mut self) {
-        nix::sys::termios::tcsetattr(0, nix::sys::termios::SetArg::TCSANOW, &self.original)
-            .unwrap();
+        nix::sys::termios::tcsetattr(
+            std::io::stdin(),
+            nix::sys::termios::SetArg::TCSANOW,
+            &self.original,
+        )
+        .unwrap();
     }
 }
 
@@ -139,9 +143,10 @@ impl Client {
         //  - Turn on raw mode
         //  - Disable Ctrl-C, Ctrl-Z, Ctrl-S, Ctrl-Q, Ctrl-\ signals
 
+        let stdin = std::io::stdin();
         let _guard = {
             use nix::sys::termios::{InputFlags, LocalFlags, OutputFlags};
-            let original_termios = nix::sys::termios::tcgetattr(0).unwrap();
+            let original_termios = nix::sys::termios::tcgetattr(&stdin).unwrap();
             let mut termios = original_termios.clone();
             termios.local_flags &= !(LocalFlags::ECHO |
                 LocalFlags::ECHONL |
@@ -160,7 +165,12 @@ impl Client {
             termios.control_chars = [nix::sys::termios::_POSIX_VDISABLE; 32];
             termios.control_chars[nix::sys::termios::SpecialCharacterIndices::VMIN as usize] = 1;
 
-            nix::sys::termios::tcsetattr(0, nix::sys::termios::SetArg::TCSANOW, &termios).unwrap();
+            nix::sys::termios::tcsetattr(
+                std::io::stdin(),
+                nix::sys::termios::SetArg::TCSANOW,
+                &termios,
+            )
+            .unwrap();
             TerminalStateGuard {
                 original: original_termios,
             }
@@ -171,8 +181,9 @@ impl Client {
         let (stdout_tx, stdout_rx) = tokio::sync::mpsc::unbounded_channel();
         std::thread::spawn(move || {
             let mut stdin_buf = [0u8; 1024];
+            let stdin = std::io::stdin().as_raw_fd();
             loop {
-                let nbytes = nix::unistd::read(libc::STDIN_FILENO, &mut stdin_buf[..]).unwrap();
+                let nbytes = nix::unistd::read(stdin, &mut stdin_buf[..]).unwrap();
                 stdin_tx
                     .blocking_send(stdin_buf[..nbytes].to_vec())
                     .unwrap();
@@ -180,10 +191,11 @@ impl Client {
         });
         let stdout_thread = std::thread::spawn(move || {
             let mut stdout_rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> = stdout_rx;
+            let stdout = std::io::stdout();
             while let Some(data) = stdout_rx.blocking_recv() {
                 let mut data = &data[..];
                 while !data.is_empty() {
-                    let nbytes = nix::unistd::write(libc::STDOUT_FILENO, data).unwrap();
+                    let nbytes = nix::unistd::write(&stdout, data).unwrap();
                     data = &data[nbytes..];
                 }
             }

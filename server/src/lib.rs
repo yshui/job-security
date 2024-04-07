@@ -2,7 +2,7 @@ mod pty;
 use std::{
     ffi::{OsStr, OsString},
     os::{
-        fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd},
+        fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
         unix::process::CommandExt,
     },
     path::Path,
@@ -112,24 +112,7 @@ pub struct Server {
     /// When a runner is needed, `Server` will exec `/proc/self/exe` with
     /// `runner_args` as argument.
     runner_args: Vec<OsString>,
-    lock:        FlockGuard,
-}
-
-struct FlockGuard {
-    fd: std::fs::File,
-}
-
-impl FlockGuard {
-    fn new(fd: std::fs::File) -> nix::Result<Self> {
-        nix::fcntl::flock(fd.as_raw_fd(), nix::fcntl::FlockArg::LockExclusiveNonblock)?;
-        Ok(Self { fd })
-    }
-}
-
-impl Drop for FlockGuard {
-    fn drop(&mut self) {
-        nix::fcntl::flock(self.fd.as_raw_fd(), nix::fcntl::FlockArg::Unlock).unwrap();
-    }
+    lock:        nix::fcntl::Flock<std::fs::File>,
 }
 
 fn next_free_slot(v: &mut Vec<Option<Process>>) -> (usize, &mut Option<Process>) {
@@ -163,17 +146,19 @@ impl Server {
                 .read(true)
                 .write(true)
                 .create(true)
+                .truncate(false)
                 .open(runtime_dir.join("lock"))?,
             Err(err) => return Err(err),
         };
-        let lock = match FlockGuard::new(file) {
+        let lock = match nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+        {
             Ok(lock) => lock,
-            Err(err) if err == nix::errno::Errno::EWOULDBLOCK =>
+            Err((_, nix::errno::Errno::EWOULDBLOCK)) =>
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
                     "another instance is running",
                 )),
-            Err(err) => return Err(err.into()),
+            Err((_, err)) => return Err(err.into()),
         };
 
         std::fs::remove_file(runtime_dir.join("sock")).ok();
@@ -268,7 +253,7 @@ impl Server {
                 ready = pty.writable(), if !pty_write_buf.is_empty() && !verdict.is_terminated()=> {
                     let mut ready = ready?;
                     if let Ok(nbytes) = ready.try_io(|inner| {
-                        let nbytes = nix::unistd::write(inner.get_ref().as_raw_fd(), &pty_write_buf[..])?;
+                        let nbytes = nix::unistd::write(inner.get_ref(), &pty_write_buf[..])?;
                         if nbytes == 0 {
                             return Err(std::io::ErrorKind::WouldBlock.into());
                         }
@@ -462,12 +447,13 @@ impl Server {
                 &mut buf,
             )
             .unwrap();
-        let Ok(_) = tx.get_mut()
+        let Ok(_) = tx
+            .get_mut()
             .write_with_fd(&buf, &[data_channels.0.as_fd()])
             .await
         else {
-            // The client could have disconnected, which is fine. Don't send the client in this
-            // case. Also set client_connected to false
+            // The client could have disconnected, which is fine. Don't send the client in
+            // this case. Also set client_connected to false
             slot.shared.client_connected.store(false, Ordering::Relaxed);
             return;
         };
@@ -566,7 +552,9 @@ impl Server {
                         let lru = lru.read().await;
                         let mut latest = None;
                         for id in lru.iter().copied() {
-                            let Some(slot) = processes_read[id as usize].as_ref() else { continue };
+                            let Some(slot) = processes_read[id as usize].as_ref() else {
+                                continue
+                            };
                             if !slot.shared.client_connected.load(Ordering::Acquire) &&
                                 !slot.shared.reaped.load(Ordering::Relaxed)
                             {
@@ -578,12 +566,19 @@ impl Server {
                 };
                 let Some(id) = id else {
                     tracing::info!("No process to resume");
-                    stream.send(Event::Error(Error::NotFound { id: None })).await?;
+                    stream
+                        .send(Event::Error(Error::NotFound { id: None }))
+                        .await?;
                     return Ok(())
                 };
-                let Some(slot) = processes_read.get(id as usize).and_then(|slot| slot.as_ref()) else {
+                let Some(slot) = processes_read
+                    .get(id as usize)
+                    .and_then(|slot| slot.as_ref())
+                else {
                     tracing::info!("Process {id} not found");
-                    stream.send(Event::Error(Error::NotFound { id: Some(id) })).await?;
+                    stream
+                        .send(Event::Error(Error::NotFound { id: Some(id) }))
+                        .await?;
                     return Ok(())
                 };
                 if slot.shared.reaped.load(Ordering::Relaxed) {
@@ -701,7 +696,7 @@ pub struct Runner {
     state: State,
 }
 
-fn set_foreground(fd: RawFd, foreground: Pid) -> nix::Result<()> {
+fn set_foreground(fd: impl AsFd, foreground: Pid) -> nix::Result<()> {
     use nix::sys::signal;
     let mut sigset = signal::SigSet::empty();
     //sigset.add(signal::Signal::SIGTSTP);
@@ -739,7 +734,8 @@ impl Runner {
         }
 
         let mut framed = tokio_util::codec::Framed::new(ctl, runner_codec());
-        let RunnerRequest::Start { command, env, pwd } = framed.next().await.unwrap().unwrap() else {
+        let RunnerRequest::Start { command, env, pwd } = framed.next().await.unwrap().unwrap()
+        else {
             panic!();
         };
         let mut cmd = std::process::Command::new(&command[0]);
@@ -747,7 +743,7 @@ impl Runner {
         unsafe {
             cmd.pre_exec(|| {
                 nix::unistd::setpgid(Pid::from_raw(0), Pid::from_raw(0))?;
-                set_foreground(std::io::stdin().as_raw_fd(), nix::unistd::getpid())?;
+                set_foreground(std::io::stdin(), nix::unistd::getpid())?;
                 Ok(())
             });
         }
@@ -761,6 +757,8 @@ impl Runner {
             .send(RunnerEvent::StateChanged(ProcessState::Running, pid))
             .await
             .unwrap();
+        let stdin = std::io::stdin();
+        let stdin = stdin.as_fd();
         loop {
             select! {
                 _ = signal.recv() => {
@@ -770,7 +768,7 @@ impl Runner {
                     );
                     let status = match status {
                         Ok(status) => status,
-                        Err(e) if e == nix::errno::Errno::EAGAIN => continue,
+                        Err(nix::errno::Errno::EAGAIN) => continue,
                         Err(e) => panic!("{}", e),
                     };
                     match status {
@@ -795,7 +793,7 @@ impl Runner {
                         WaitStatus::Stopped(_, _) => {
                             self.state = State::Stopped;
                             set_foreground(
-                                std::io::stdin().as_raw_fd(),
+                                stdin,
                                 nix::unistd::getpid()
                             ).unwrap();
                             framed.send(
@@ -818,7 +816,7 @@ impl Runner {
                         RunnerRequest::Resume => {
                             assert_eq!(self.state, State::Stopped);
                             set_foreground(
-                                std::io::stdin().as_raw_fd(),
+                                stdin,
                                 Pid::from_raw(pid as i32)
                             ).unwrap();
                             nix::sys::signal::kill(

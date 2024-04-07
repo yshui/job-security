@@ -2,8 +2,8 @@
 use std::{
     fs::File,
     os::{
-        fd::OwnedFd,
-        unix::prelude::{AsRawFd, FromRawFd, RawFd},
+        fd::{AsFd, BorrowedFd, OwnedFd},
+        unix::prelude::{AsRawFd, FromRawFd},
     },
     thread,
     time::{self, Duration},
@@ -13,10 +13,10 @@ pub use nix::Error;
 use nix::{
     fcntl::{open, OFlag},
     ioctl_write_ptr_bad,
-    libc::{self, winsize, STDIN_FILENO, STDOUT_FILENO},
+    libc::{self, winsize},
     pty::{grantpt, posix_openpt, unlockpt, PtyMaster},
     sys::{stat::Mode, termios},
-    unistd::{close, dup, isatty, setsid},
+    unistd::{close, isatty, setsid},
     Result,
 };
 use termios::SpecialCharacterIndices;
@@ -59,8 +59,9 @@ impl PtyProcess {
             command.pre_exec(move || -> std::io::Result<()> {
                 make_controlling_tty(&pts_name)?;
 
-                set_echo(STDIN_FILENO, false)?;
-                set_term_size(STDIN_FILENO, cols, rows)?;
+                let stdin = std::io::stdin();
+                set_echo(&stdin, false)?;
+                set_term_size(stdin.as_raw_fd(), cols, rows)?;
                 Ok(())
             });
         }
@@ -75,7 +76,7 @@ impl PtyProcess {
         ))
     }
 
-    pub fn get_raw_handle(&self) -> Result<File> {
+    pub fn get_raw_handle(&self) -> std::io::Result<File> {
         self.master.get_file_handle()
     }
 
@@ -93,29 +94,29 @@ impl PtyProcess {
     ///
     /// Default size is 80x24.
     pub fn get_window_size(&self) -> Result<(u16, u16)> {
-        get_term_size(self.master.as_raw_fd())
+        get_term_size(self.master.as_fd().as_raw_fd())
     }
 
     /// Sets a terminal size.
     pub fn set_window_size(&self, cols: u16, rows: u16) -> Result<()> {
-        set_term_size(self.master.as_raw_fd(), cols, rows)
+        set_term_size(self.master.as_fd().as_raw_fd(), cols, rows)
     }
 
     /// The function returns true if an echo setting is setup.
     pub fn get_echo(&self) -> Result<bool> {
-        termios::tcgetattr(self.master.as_raw_fd())
+        termios::tcgetattr(&self.master)
             .map(|flags| flags.local_flags.contains(termios::LocalFlags::ECHO))
     }
 
     /// Sets a echo setting for a terminal
     pub fn set_echo(&mut self, on: bool, timeout: Option<Duration>) -> Result<bool> {
-        set_echo(self.master.as_raw_fd(), on)?;
+        set_echo(&self.master, on)?;
         self.wait_echo(on, timeout)
     }
 
     /// Returns true if a underline `fd` connected with a TTY.
     pub fn isatty(&self) -> Result<bool> {
-        isatty(self.master.as_raw_fd())
+        isatty(self.master.as_fd().as_raw_fd())
     }
 
     /// Set the pty process's terminate approach delay.
@@ -205,17 +206,17 @@ impl Master {
         Ok(unsafe { OwnedFd::from_raw_fd(slave_fd) })
     }
 
-    fn get_file_handle(&self) -> Result<File> {
-        let fd = dup(self.as_raw_fd())?;
-        let file = unsafe { File::from_raw_fd(fd) };
+    fn get_file_handle(&self) -> std::io::Result<File> {
+        let fd = self.as_fd().try_clone_to_owned()?;
+        let file = fd.into();
 
         Ok(file)
     }
 }
 
-impl AsRawFd for Master {
-    fn as_raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
+impl AsFd for Master {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        unsafe { BorrowedFd::borrow_raw(self.fd.as_raw_fd()) }
     }
 }
 
@@ -223,10 +224,10 @@ fn get_slave_name(fd: &PtyMaster) -> Result<String> {
     nix::pty::ptsname_r(fd)
 }
 
-fn set_echo(fd: RawFd, on: bool) -> Result<()> {
+fn set_echo(fd: impl AsFd, on: bool) -> Result<()> {
     // Set echo off
     // Even though there may be something left behind https://stackoverflow.com/a/59034084
-    let mut flags = termios::tcgetattr(fd)?;
+    let mut flags = termios::tcgetattr(fd.as_fd())?;
     match on {
         true => flags.local_flags |= termios::LocalFlags::ECHO,
         false => flags.local_flags &= !termios::LocalFlags::ECHO,
@@ -236,8 +237,8 @@ fn set_echo(fd: RawFd, on: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn set_raw(fd: RawFd) -> Result<()> {
-    let mut flags = termios::tcgetattr(fd)?;
+pub fn set_raw(fd: impl AsFd) -> Result<()> {
+    let mut flags = termios::tcgetattr(fd.as_fd())?;
 
     termios::cfmakeraw(&mut flags);
     termios::tcsetattr(fd, termios::SetArg::TCSANOW, &flags)?;
@@ -245,7 +246,7 @@ pub fn set_raw(fd: RawFd) -> Result<()> {
 }
 
 fn get_this_term_char(char: SpecialCharacterIndices) -> Option<u8> {
-    for &fd in &[STDIN_FILENO, STDOUT_FILENO] {
+    for &fd in &[std::io::stdin().as_fd(), std::io::stdout().as_fd()] {
         if let Ok(char) = get_term_char(fd, char) {
             return Some(char)
         }
@@ -262,7 +263,7 @@ fn get_eof_char() -> u8 {
     get_this_term_char(SpecialCharacterIndices::VEOF).unwrap_or(DEFAULT_VEOF_CHAR)
 }
 
-fn get_term_char(fd: RawFd, char: SpecialCharacterIndices) -> Result<u8> {
+fn get_term_char(fd: impl AsFd, char: SpecialCharacterIndices) -> Result<u8> {
     let flags = termios::tcgetattr(fd)?;
     let b = flags.control_chars[char as usize];
     Ok(b)
