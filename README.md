@@ -1,5 +1,9 @@
 # job-security - job control from anywhere!
 
+> [!WARNING]
+>
+> Archive notice: job control has been supported natively (albeit experimentally) by nushell since version 0.103.0. Additionally since I no longer use nushell, I don't have time, bandwidth, nor motivation to maintain this anymore.
+
 **job**-**s**ecurity is a tool that lets you put your running programs into background, then bring them to the foreground anywhere you want.
 
 It also supplements shells that doesn't natively support job control, such as nushell, elvish, etc.
